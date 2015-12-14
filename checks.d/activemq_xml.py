@@ -28,9 +28,8 @@ SUBSCRIBER_TAGS = [
 
 MAX_ELEMENTS = 300
 
+
 class ActiveMQXML(AgentCheck):
-    # do this so we can mock out requests in unit tests
-    requests = requests
 
     def check(self, instance):
         url = instance.get("url")
@@ -62,22 +61,26 @@ class ActiveMQXML(AgentCheck):
             auth = (username, password)
         url = "%s%s" % (base_url, xml_url)
         self.log.debug("ActiveMQ Fetching queue data from: %s" % url)
-        r = self.requests.get(url, auth=auth)
+        r = requests.get(url, auth=auth)
         r.raise_for_status()
         return r.text
 
     def _process_data(self, data, el_type, tags, max_elements, detailed_elements):
         root = ElementTree.fromstring(data)
-        elements = [e for e in root.findall(el_type) if e.get("name")]
+        # if list provided in config, only send those metrics
+        if detailed_elements:
+            elements = [e for e in root.findall(el_type) if e.get('name') in detailed_elements]
+        else:
+            elements = [e for e in root.findall(el_type) if e.get('name')]
         count = len(elements)
 
         if count > max_elements:
             if not detailed_elements:
-                self.warning("""Number of {0} is too high ({1} > {2}).
-                    Please use the detailed_{0}s parameter to list the {0} you want to monitor."""\
-                    .format(el_type, count, max_elements))
-            else:
-                elements = [e for e in elements if e in detailed_elements]
+                self.warning("Number of {0} is too high ({1} > {2}). "
+                             "Please use the detailed_{0}s parameter"
+                             " to list the {0} you want to monitor.".format(el_type,
+                                                                            count,
+                                                                            max_elements))
 
         for el in elements[:max_elements]:
             name = el.get("name")
@@ -94,19 +97,21 @@ class ActiveMQXML(AgentCheck):
         self.log.debug("ActiveMQ {0} count: {1}".format(el_type, count))
         self.gauge("activemq.{0}.count".format(el_type), count, tags=tags)
 
-
     def _process_subscriber_data(self, data, tags, max_subscribers, detailed_subscribers):
         root = ElementTree.fromstring(data)
-        subscribers = [s for s in root.findall("subscriber") if s.get("clientId")]
+        # if subscribers list provided in config, only send those metrics
+        if detailed_subscribers:
+            subscribers = [s for s in root.findall("subscriber") if s.get("clientId") in detailed_subscribers]
+        else:
+            subscribers = [s for s in root.findall("subscriber") if s.get("clientId")]
+
         count = len(subscribers)
         if count > max_subscribers:
             if not detailed_subscribers:
-                self.warning("""Number of subscribers is too high ({0} > {1}).
-                    Please use the detailed_subscribers parameter to list the {0} you want to monitor."""\
-                    .format(count, max_subscribers))
-            else:
-                subscribers = [s for s in subscribers if s in detailed_subscribers]
-
+                self.warning("Number of subscribers is too high ({0} > {1})."
+                             "Please use the detailed_subscribers parameter "
+                             "to list the {0} you want to monitor.".format(count,
+                                                                           max_subscribers))
 
         for subscriber in subscribers[:max_subscribers]:
             clientId = subscriber.get("clientId")
@@ -136,11 +141,16 @@ class ActiveMQXML(AgentCheck):
                     enqueue_counter, dispatched_queue_size, dispatched_counter
                 )
             )
-            self.gauge("activemq.subscriber.pending_queue_size", pending_queue_size, tags=el_tags)
-            self.gauge("activemq.subscriber.dequeue_counter", dequeue_counter, tags=el_tags)
-            self.gauge("activemq.subscriber.enqueue_counter", enqueue_counter, tags=el_tags)
-            self.gauge("activemq.subscriber.dispatched_queue_size", dispatched_queue_size, tags=el_tags)
-            self.gauge("activemq.subscriber.dispatched_counter", dispatched_counter, tags=el_tags)
+            self.gauge("activemq.subscriber.pending_queue_size",
+                       pending_queue_size, tags=el_tags)
+            self.gauge("activemq.subscriber.dequeue_counter",
+                       dequeue_counter, tags=el_tags)
+            self.gauge("activemq.subscriber.enqueue_counter",
+                       enqueue_counter, tags=el_tags)
+            self.gauge("activemq.subscriber.dispatched_queue_size",
+                       dispatched_queue_size, tags=el_tags)
+            self.gauge("activemq.subscriber.dispatched_counter",
+                       dispatched_counter, tags=el_tags)
 
         self.log.debug("ActiveMQ Subscriber Count: {0}".format(count))
         self.gauge("activemq.subscriber.count", count, tags=tags)

@@ -4,35 +4,40 @@ A Python Statsd implementation with some datadog special sauce.
 """
 
 # set up logging before importing any other components
-from config import initialize_logging
+from config import initialize_logging  # noqa
 initialize_logging('dogstatsd')
 
-import os
-os.umask(022)
+
+from utils.proxy import set_no_proxy_settings  # noqa
+set_no_proxy_settings()
 
 # stdlib
 import logging
 import optparse
-import re
+import os
 import select
 import signal
 import socket
 import sys
-import zlib
-from time import time, sleep
 import threading
+from time import sleep, time
 from urllib import urlencode
+import zlib
 
-# project
-from aggregator import MetricsBucketAggregator, get_formatter
-from checks.check_status import DogstatsdStatus
-from config import get_config
-from daemon import Daemon, AgentSupervisor
-from util import PidFile, get_hostname, plural, get_uuid, chunks
+# For pickle & PID files, see issue 293
+os.umask(022)
 
 # 3rd party
 import requests
 import simplejson as json
+
+# project
+from aggregator import get_formatter, MetricsBucketAggregator
+from checks.check_status import DogstatsdStatus
+from config import get_config, get_version
+from daemon import AgentSupervisor, Daemon
+from util import chunks, get_hostname, get_uuid, plural
+from utils.pidfile import PidFile
 
 # urllib3 logs a bunch of stuff at the info level
 requests_log = logging.getLogger("requests.packages.urllib3")
@@ -56,8 +61,9 @@ FLUSH_LOGGING_COUNT = 5
 EVENT_CHUNK_SIZE = 50
 COMPRESS_THRESHOLD = 1024
 
+
 def serialize_metrics(metrics):
-    serialized = json.dumps({"series" : metrics})
+    serialized = json.dumps({"series": metrics})
     if len(serialized) > COMPRESS_THRESHOLD:
         headers = {'Content-Type': 'application/json',
                    'Content-Encoding': 'deflate'}
@@ -66,8 +72,10 @@ def serialize_metrics(metrics):
         headers = {'Content-Type': 'application/json'}
     return serialized, headers
 
+
 def serialize_event(event):
     return json.dumps(event)
+
 
 class Reporter(threading.Thread):
     """
@@ -75,7 +83,8 @@ class Reporter(threading.Thread):
     server.
     """
 
-    def __init__(self, interval, metrics_aggregator, api_host, api_key=None, use_watchdog=False, event_chunk_size=None):
+    def __init__(self, interval, metrics_aggregator, api_host, api_key=None,
+                 use_watchdog=False, event_chunk_size=None):
         threading.Thread.__init__(self)
         self.interval = int(interval)
         self.finished = threading.Event()
@@ -104,7 +113,7 @@ class Reporter(threading.Thread):
         # Persist a start-up message.
         DogstatsdStatus().persist()
 
-        while not self.finished.isSet(): # Use camel case isSet for 2.4 support.
+        while not self.finished.isSet():  # Use camel case isSet for 2.4 support.
             self.finished.wait(self.interval)
             self.metrics_aggregator.send_packet_count('datadog.dogstatsd.packet.count')
             self.flush()
@@ -135,15 +144,15 @@ class Reporter(threading.Thread):
                 self.submit_events(events)
 
             service_checks = self.metrics_aggregator.flush_service_checks()
-            check_count = len(service_checks)
-            if check_count:
+            service_check_count = len(service_checks)
+            if service_check_count:
                 self.submit_service_checks(service_checks)
 
             should_log = self.flush_count <= FLUSH_LOGGING_INITIAL or self.log_count <= FLUSH_LOGGING_COUNT
             log_func = log.info
             if not should_log:
                 log_func = log.debug
-            log_func("Flush #%s: flushed %s metric%s, %s event%s, and %s service check run%s" % (self.flush_count, count, plural(count), event_count, plural(event_count), check_count, plural(check_count)))
+            log_func("Flush #%s: flushed %s metric%s, %s event%s, and %s service check run%s" % (self.flush_count, count, plural(count), event_count, plural(event_count), service_check_count, plural(service_check_count)))
             if self.flush_count == FLUSH_LOGGING_INITIAL:
                 log.info("First flushes done, %s flushes will be logged every %s flushes." % (FLUSH_LOGGING_COUNT, FLUSH_LOGGING_PERIOD))
 
@@ -155,6 +164,7 @@ class Reporter(threading.Thread):
                 packets_per_second=packets_per_second,
                 metric_count=count,
                 event_count=event_count,
+                service_check_count=service_check_count,
             ).persist()
 
         except Exception:
@@ -173,7 +183,6 @@ class Reporter(threading.Thread):
 
     def submit_events(self, events):
         headers = {'Content-Type':'application/json'}
-        events_len = len(events)
         event_chunk_size = self.event_chunk_size
 
         for chunk in chunks(events, event_chunk_size):
@@ -190,20 +199,14 @@ class Reporter(threading.Thread):
                 params['api_key'] = self.api_key
             url = '%s/intake?%s' % (self.api_host, urlencode(params))
 
-            self.submit_http(url, payload, headers)
+            self.submit_http(url, json.dumps(payload), headers)
 
     def submit_http(self, url, data, headers):
-        no_proxy = {
-        # See https://github.com/kennethreitz/requests/issues/879
-        # and https://github.com/DataDog/dd-agent/issues/1112
-            'no': 'pass',
-        }
+        headers["DD-Dogstatsd-Version"] = get_version()
         log.debug("Posting payload to %s" % url)
         try:
             start_time = time()
-            r = requests.post(url, data=data, timeout=5,
-                headers=headers, proxies=no_proxy)
-
+            r = requests.post(url, data=data, timeout=5, headers=headers)
             r.raise_for_status()
 
             if r.status_code >= 200 and r.status_code < 205:
@@ -211,15 +214,13 @@ class Reporter(threading.Thread):
 
             status = r.status_code
             duration = round((time() - start_time) * 1000.0, 4)
-            log.debug("%s POST %s (%sms)" % (
-                            status, url, duration))
+            log.debug("%s POST %s (%sms)" % (status, url, duration))
         except Exception:
             log.exception("Unable to post payload.")
             try:
                 log.error("Received status code: {0}".format(r.status_code))
             except Exception:
                 pass
-
 
     def submit_service_checks(self, service_checks):
         headers = {'Content-Type':'application/json'}
@@ -230,6 +231,7 @@ class Reporter(threading.Thread):
 
         url = '{0}/api/v1/check_run?{1}'.format(self.api_host, urlencode(params))
         self.submit_http(url, json.dumps(service_checks), headers)
+
 
 class Server(object):
     """
@@ -320,7 +322,6 @@ class Dogstatsd(Daemon):
         self.server = server
         self.reporter = reporter
 
-
     def _handle_sigterm(self, signum, frame):
         log.debug("Caught sigterm. Stopping run loop.")
         self.server.stop()
@@ -351,6 +352,7 @@ class Dogstatsd(Daemon):
             if self.autorestart:
                 sys.exit(AgentSupervisor.RESTART_EXIT_STATUS)
 
+    @classmethod
     def info(self):
         logging.getLogger().setLevel(logging.ERROR)
         return DogstatsdStatus.print_latest_status()
@@ -361,8 +363,8 @@ def init(config_path=None, use_watchdog=False, use_forwarder=False, args=None):
     """
     c = get_config(parse_args=False, cfg_path=config_path)
 
-    if not c['use_dogstatsd'] and \
-        (args and args[0] in ['start', 'restart'] or not args):
+    if (not c['use_dogstatsd'] and
+            (args and args[0] in ['start', 'restart'] or not args)):
         log.info("Dogstatsd is disabled. Exiting")
         # We're exiting purposefully, so exit with zero (supervisor's expected
         # code). HACK: Sleep a little bit so supervisor thinks we've started cleanly
@@ -372,9 +374,9 @@ def init(config_path=None, use_watchdog=False, use_forwarder=False, args=None):
 
     log.debug("Configuring dogstatsd")
 
-    port      = c['dogstatsd_port']
-    interval  = DOGSTATSD_FLUSH_INTERVAL
-    api_key   = c['api_key']
+    port = c['dogstatsd_port']
+    interval = DOGSTATSD_FLUSH_INTERVAL
+    api_key = c['api_key']
     aggregator_interval = DOGSTATSD_AGGREGATOR_BUCKET_SIZE
     non_local_traffic = c['non_local_traffic']
     forward_to_host = c.get('statsd_forward_host')
@@ -416,17 +418,29 @@ def init(config_path=None, use_watchdog=False, use_forwarder=False, args=None):
 
     return reporter, server, c
 
+
 def main(config_path=None):
     """ The main entry point for the unix version of dogstatsd. """
+    # Deprecation notice
+    from utils.deprecations import deprecate_old_command_line_tools
+    deprecate_old_command_line_tools()
+
+    COMMANDS_START_DOGSTATSD = [
+        'start',
+        'stop',
+        'restart',
+        'status'
+    ]
+
     parser = optparse.OptionParser("%prog [start|stop|restart|status]")
     parser.add_option('-u', '--use-local-forwarder', action='store_true',
-                        dest="use_forwarder", default=False)
+                      dest="use_forwarder", default=False)
     opts, args = parser.parse_args()
 
-    reporter, server, cnf = init(config_path, use_watchdog=True, use_forwarder=opts.use_forwarder, args=args)
-    pid_file = PidFile('dogstatsd')
-    daemon = Dogstatsd(pid_file.get_path(), server, reporter,
-            cnf.get('autorestart', False))
+    if not args or args[0] in COMMANDS_START_DOGSTATSD:
+        reporter, server, cnf = init(config_path, use_watchdog=True, use_forwarder=opts.use_forwarder, args=args)
+        daemon = Dogstatsd(PidFile('dogstatsd').get_path(), server, reporter,
+                           cnf.get('autorestart', False))
 
     # If no args were passed in, run the server in the foreground.
     if not args:
@@ -446,7 +460,7 @@ def main(config_path=None):
         elif command == 'status':
             daemon.status()
         elif command == 'info':
-            return daemon.info()
+            return Dogstatsd.info()
         else:
             sys.stderr.write("Unknown command: %s\n\n" % command)
             parser.print_help()

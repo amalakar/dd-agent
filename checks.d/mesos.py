@@ -1,20 +1,27 @@
 # stdlib
-import time
 from hashlib import md5
-import urllib2
+import time
+
+# 3rd party
+import requests
 
 # project
 from checks import AgentCheck
-from util import headers
 
-# 3rd party
-import simplejson as json
-import requests
 
 class Mesos(AgentCheck):
     SERVICE_CHECK_NAME = "mesos.can_connect"
 
     def check(self, instance):
+        """
+        DEPRECATED:
+        This generic Mesosphere check is deprecated not actively developed anymore. It will be
+        removed in a future version of the Datadog Agent.
+        Please head over to the Mesosphere master and slave specific checks.
+        """
+        self.warning("This check is deprecated in favor of Mesos master and slave specific checks."
+                     " It will be removed in a future version of the Datadog Agent.")
+
         if 'url' not in instance:
             raise Exception('Mesos instance missing "url" value.')
 
@@ -91,7 +98,7 @@ class Mesos(AgentCheck):
             msg = "%s seconds timeout when hitting %s" % (timeout, url)
             status = AgentCheck.CRITICAL
         except Exception as e:
-            msg = e.message
+            msg = str(e)
             status = AgentCheck.CRITICAL
         finally:
             self.service_check(self.SERVICE_CHECK_NAME, status, tags=tags, message=msg)

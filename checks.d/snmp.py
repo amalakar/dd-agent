@@ -1,15 +1,18 @@
 # std
 from collections import defaultdict
+from functools import wraps
+
+# 3rd party
+from pysnmp.entity.rfc3413.oneliner import cmdgen
+import pysnmp.proto.rfc1902 as snmp_type
+from pysnmp.smi import builder
+from pysnmp.smi.exval import noSuchInstance, noSuchObject
 
 # project
 from checks import AgentCheck
 from config import _is_affirmative
 
-# 3rd party
-from pysnmp.entity.rfc3413.oneliner import cmdgen
-from pysnmp.smi.exval import noSuchInstance, noSuchObject
-from pysnmp.smi import builder
-import pysnmp.proto.rfc1902 as snmp_type
+
 
 # Additional types that are not part of the SNMP protocol. cf RFC 2856
 (CounterBasedGauge64, ZeroBasedCounter64) = builder.MibBuilder().importSymbols(
@@ -30,7 +33,7 @@ SNMP_GAUGES = frozenset([
     snmp_type.Integer.__name__,
     snmp_type.Integer32.__name__])
 
-OID_BATCH_SIZE = 10
+DEFAULT_OID_BATCH_SIZE = 10
 
 
 def reply_invalid(oid):
@@ -42,8 +45,8 @@ class SnmpCheck(AgentCheck):
 
     cmd_generator = None
     # pysnmp default values
-    RETRIES = 5
-    TIMEOUT = 1
+    DEFAULT_RETRIES = 5
+    DEFAULT_TIMEOUT = 1
 
     def __init__(self, name, init_config, agentConfig, instances=None):
         AgentCheck.__init__(self, name, init_config, agentConfig, instances)
@@ -55,24 +58,44 @@ class SnmpCheck(AgentCheck):
             mibs_path = init_config.get("mibs_folder")
             ignore_nonincreasing_oid = _is_affirmative(
                 init_config.get("ignore_nonincreasing_oid", False))
-        SnmpCheck.create_command_generator(mibs_path, ignore_nonincreasing_oid)
 
-    @classmethod
-    def create_command_generator(cls, mibs_path, ignore_nonincreasing_oid):
+        # Create SNMP command generator and aliases
+        self.create_command_generator(mibs_path, ignore_nonincreasing_oid)
+
+        # Set OID batch size
+        self.oid_batch_size = int(init_config.get("oid_batch_size", DEFAULT_OID_BATCH_SIZE))
+
+    def snmp_logger(self, func):
+        """
+        Decorator to log, with DEBUG level, SNMP commands
+        """
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            self.log.debug("Running SNMP command {0} on OIDS {1}"
+                           .format(func.__name__, args[2:]))
+            result = func(*args, **kwargs)
+            self.log.debug("Returned vars: {0}".format(result[-1]))
+            return result
+        return wrapper
+
+    def create_command_generator(self, mibs_path, ignore_nonincreasing_oid):
         '''
         Create a command generator to perform all the snmp query.
         If mibs_path is not None, load the mibs present in the custom mibs
         folder. (Need to be in pysnmp format)
         '''
-        cls.cmd_generator = cmdgen.CommandGenerator()
-        cls.cmd_generator.ignoreNonIncreasingOid = ignore_nonincreasing_oid
+        self.cmd_generator = cmdgen.CommandGenerator()
+        self.cmd_generator.ignoreNonIncreasingOid = ignore_nonincreasing_oid
         if mibs_path is not None:
-            mib_builder = cls.cmd_generator.snmpEngine.msgAndPduDsp.\
-                          mibInstrumController.mibBuilder
-            mib_sources = mib_builder.getMibSources() + (
-                    builder.DirMibSource(mibs_path),
-                    )
+            mib_builder = self.cmd_generator.snmpEngine.msgAndPduDsp.\
+                mibInstrumController.mibBuilder
+            mib_sources = mib_builder.getMibSources() + \
+                (builder.DirMibSource(mibs_path), )
             mib_builder.setMibSources(*mib_sources)
+
+        # Set aliases for snmpget and snmpgetnext with logging
+        self.snmpget = self.snmp_logger(self.cmd_generator.getCmd)
+        self.snmpgetnext = self.snmp_logger(self.cmd_generator.nextCmd)
 
     @classmethod
     def get_auth_data(cls, instance):
@@ -83,7 +106,13 @@ class SnmpCheck(AgentCheck):
         '''
         if "community_string" in instance:
             # SNMP v1 - SNMP v2
-            return cmdgen.CommunityData(instance['community_string'])
+
+            # See http://pysnmp.sourceforge.net/docs/current/security-configuration.html
+            if int(instance.get("snmp_version", 2)) == 1:
+                return cmdgen.CommunityData(instance['community_string'],
+                    mpModel=0)
+            return cmdgen.CommunityData(instance['community_string'], mpModel=1)
+
         elif "user" in instance:
             # SNMP v3
             user = instance["user"]
@@ -118,7 +147,7 @@ class SnmpCheck(AgentCheck):
         if "ip_address" not in instance:
             raise Exception("An IP address needs to be specified")
         ip_address = instance["ip_address"]
-        port = instance.get("port", 161) # Default SNMP port
+        port = int(instance.get("port", 161)) # Default SNMP port
         return cmdgen.UdpTransportTarget((ip_address, port), timeout=timeout, retries=retries)
 
     def raise_on_error_indication(self, error_indication, instance):
@@ -128,7 +157,7 @@ class SnmpCheck(AgentCheck):
             instance["service_check_error"] = message
             raise Exception(message)
 
-    def check_table(self, instance, oids, lookup_names):
+    def check_table(self, instance, oids, lookup_names, timeout, retries):
         '''
         Perform a snmpwalk on the domain specified by the oids, on the device
         configured in instance.
@@ -145,7 +174,7 @@ class SnmpCheck(AgentCheck):
         # snmpgetnext -v2c -c public localhost:11111 1.36.1.2.1.25.4.2.1.7.222
         # iso.3.6.1.2.1.25.4.2.1.7.224 = INTEGER: 2
         # SOLUTION: perform a snmget command and fallback with snmpgetnext if not found
-        transport_target = self.get_transport_target(instance, self.TIMEOUT, self.RETRIES)
+        transport_target = self.get_transport_target(instance, timeout, retries)
         auth_data = self.get_auth_data(instance)
 
         first_oid = 0
@@ -155,24 +184,17 @@ class SnmpCheck(AgentCheck):
         while first_oid < len(oids):
 
             # Start with snmpget command
-            snmp_command = self.cmd_generator.getCmd
-            error_indication, error_status, error_index, var_binds = snmp_command(
+            error_indication, error_status, error_index, var_binds = self.snmpget(
                 auth_data,
                 transport_target,
-                *(oids[first_oid:first_oid + OID_BATCH_SIZE]),
+                *(oids[first_oid:first_oid + self.oid_batch_size]),
                 lookupValues=lookup_names,
                 lookupNames=lookup_names)
 
+            first_oid = first_oid + self.oid_batch_size
+
             # Raise on error_indication
             self.raise_on_error_indication(error_indication, instance)
-
-            # Continue on error_status
-            if error_status:
-                message = "{0} for instance {1}".format(error_status.prettyPrint(),
-                                                        instance["ip_address"])
-                instance["service_check_error"] = message
-                self.log.warning(message)
-                continue
 
             missing_results = []
             complete_results = []
@@ -188,8 +210,7 @@ class SnmpCheck(AgentCheck):
 
             if missing_results:
                 # If we didn't catch the metric using snmpget, try snmpnext
-                snmp_command = self.cmd_generator.nextCmd
-                error_indication, error_status, error_index, var_binds_table = snmp_command(
+                error_indication, error_status, error_index, var_binds_table = self.snmpgetnext(
                     auth_data,
                     transport_target,
                     *missing_results,
@@ -199,18 +220,16 @@ class SnmpCheck(AgentCheck):
                 # Raise on error_indication
                 self.raise_on_error_indication(error_indication, instance)
 
-                # Continue on error_status
                 if error_status:
                     message = "{0} for instance {1}".format(error_status.prettyPrint(),
                                                             instance["ip_address"])
                     instance["service_check_error"] = message
                     self.log.warning(message)
-                    continue
+
                 for table_row in var_binds_table:
                     complete_results.extend(table_row)
 
             all_binds.extend(complete_results)
-            first_oid = first_oid + OID_BATCH_SIZE
 
         for result_oid, value in all_binds:
             if lookup_names:
@@ -220,7 +239,7 @@ class SnmpCheck(AgentCheck):
                 oid = result_oid.asTuple()
                 matching = ".".join([str(i) for i in oid])
                 results[matching] = value
-
+        self.log.debug("Raw results: {0}".format(results))
         return results
 
     def check(self, instance):
@@ -232,6 +251,8 @@ class SnmpCheck(AgentCheck):
         ip_address = instance["ip_address"]
         table_oids = []
         raw_oids = []
+        timeout = int(instance.get('timeout', self.DEFAULT_TIMEOUT))
+        retries = int(instance.get('retries', self.DEFAULT_RETRIES))
 
         # Check the metrics completely defined
         for metric in instance.get('metrics', []):
@@ -250,12 +271,12 @@ class SnmpCheck(AgentCheck):
         try:
             if table_oids:
                 self.log.debug("Querying device %s for %s oids", ip_address, len(table_oids))
-                table_results = self.check_table(instance, table_oids, True)
+                table_results = self.check_table(instance, table_oids, True, timeout, retries)
                 self.report_table_metrics(instance, table_results)
 
             if raw_oids:
                 self.log.debug("Querying device %s for %s oids", ip_address, len(raw_oids))
-                raw_results = self.check_table(instance, raw_oids, False)
+                raw_results = self.check_table(instance, raw_oids, False, timeout, retries)
                 self.report_raw_metrics(instance, raw_results)
         except Exception as e:
             if "service_check_error" not in instance:
@@ -329,7 +350,7 @@ class SnmpCheck(AgentCheck):
                 name = metric['symbol']
                 result = results[name].items()
                 if len(result) > 1:
-                    self.log("Several rows corresponding while the metric is supposed to be a scalar")
+                    self.log.warning("Several rows corresponding while the metric is supposed to be a scalar")
                     continue
                 val = result[0][1]
                 self.submit_metric(name, val, tags)

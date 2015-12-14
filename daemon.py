@@ -12,12 +12,15 @@
 
 # Core modules
 import atexit
+import errno
+import logging
 import os
+import signal
 import sys
 import time
-import logging
-import errno
-import signal
+
+# project
+from utils.process import is_my_process
 
 log = logging.getLogger(__name__)
 
@@ -158,10 +161,15 @@ class Daemon(object):
         pid = self.pid()
 
         if pid:
-            message = "pidfile %s already exists. Is it already running?\n"
-            log.error(message % self.pidfile)
-            sys.stderr.write(message % self.pidfile)
-            sys.exit(1)
+            # Check if the pid in the pidfile corresponds to a running process
+            # and if psutil is installed, check if it's a datadog-agent one
+            if is_my_process(pid):
+                log.error("Not starting, another instance is already running"
+                          " (using pidfile {0})".format(self.pidfile))
+                sys.exit(1)
+            else:
+                log.warn("pidfile doesn't contain the pid of an agent process."
+                         ' Starting normally')
 
         log.info("Pidfile: %s" % self.pidfile)
         if not foreground:
@@ -220,8 +228,8 @@ class Daemon(object):
         """
         raise NotImplementedError
 
-
-    def info(self):
+    @classmethod
+    def info(cls):
         """
         You should override this method when you subclass Daemon. It will be
         called to provide information about the status of the process

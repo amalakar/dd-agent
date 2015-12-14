@@ -7,11 +7,31 @@ instances:
     url: http://some.url.example.com
     timeout: 1
 
+    # The (optional) content_match parameter will allow the check
+    # to look for a particular string within the response. The check
+    # will report as DOWN if the string is not found.
+    #
+    # content_match uses Python regular expressions which means that
+    # you will have to escape the following "special" characters with
+    # a backslash (\) if you're trying to match them in your content:
+    #  . ^ $ * + ? { } [ ] \ | ( )
+    #
+    # Examples:
+    # content_match: 'In Stock'
+    # content_match: '^(Bread|Apples|Very small rocks|Cider|Gravy|Cherries|Mud|Churches|Lead) float(s)? in water'
+
     # If your service uses basic authentication, you can optionally
     # specify a username and password that will be used in the check.
     #
     # username: user
     # password: pass
+
+    # The (optional) http_response_status_code parameter will instruct the check
+    # to look for a particular HTTP response status code or a Regex identifying
+    # a set of possible status codes.
+    # The check will report as DOWN if status code returned differs.
+    # This defaults to 1xx, 2xx and 3xx HTTP status code: (1|2|3)\d\d.
+    # http_response_status_code: 401
 
     # The (optional) window and threshold parameters allow you to trigger
     # alerts only if the check fails x times within the last y attempts
@@ -40,16 +60,27 @@ instances:
     # This is mostly useful when checking SSL connections signed with
     # certificates that are not themselves signed by a public authority.
     # When true, the check logs a warning in collector.log
+    # Defaults to true, set to false if you want SSL certificate validation.
     #
     # disable_ssl_validation: true
 
-    # The (optional) ssl_expire will instruct the check
+    # Path of trusted CA certificates used to validate the SSL certificate
+    # for this url.
+    # Overrides the default path and the one specified in init_config.
+    #
+    # ca_certs: /etc/ssl/certs/ca-certificates.crt
+
+    # The (optional) check_certificate_expiration will instruct the check
     # to create a service check that checks the expiration of the
     # ssl certificate. Allow for a warning to occur when x days are
-    # left in the certificate.
+    # left in the certificate, and alternatively raise a critical
+    # warning if the certificate is y days from the expiration date.
+    # The SSL certificate will always be validated for this additional
+    # service check regardless of the value of disable_ssl_validation
     #
     # check_certificate_expiration: true
     # days_warning: 14
+    # days_critical: 7
 
     # The (optional) headers parameter allows you to send extra headers
     # with the request. This is useful for explicitly specifying the host

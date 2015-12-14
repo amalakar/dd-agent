@@ -1,61 +1,62 @@
 # stdlib
-import urllib
-import urllib2
-import urlparse
-import time
 import re
-import pprint
+import time
+import urllib
+import urlparse
+
+# 3p
+import requests
 
 # project
 from checks import AgentCheck
-
-# 3rd party
-import simplejson as json
 
 EVENT_TYPE = SOURCE_TYPE_NAME = 'rabbitmq'
 QUEUE_TYPE = 'queues'
 NODE_TYPE = 'nodes'
 MAX_DETAILED_QUEUES = 200
 MAX_DETAILED_NODES = 100
-ALERT_THRESHOLD = 0.9 # Post an event in the stream when the number of queues or nodes to collect is above 90% of the limit:
+# Post an event in the stream when the number of queues or nodes to
+# collect is above 90% of the limit:
+ALERT_THRESHOLD = 0.9
 QUEUE_ATTRIBUTES = [
-    # Path, Name
-    ('active_consumers', 'active_consumers'),
-    ('consumers', 'consumers'),
-    ('consumer_utilisation', 'consumer_utilisation'),
+    # Path, Name, Operation
+    ('active_consumers', 'active_consumers', float),
+    ('consumers', 'consumers', float),
+    ('consumer_utilisation', 'consumer_utilisation', float),
 
-    ('memory', 'memory'),
+    ('memory', 'memory', float),
 
-    ('messages', 'messages'),
-    ('messages_details/rate', 'messages.rate'),
+    ('messages', 'messages', float),
+    ('messages_details/rate', 'messages.rate', float),
 
-    ('messages_ready', 'messages_ready'),
-    ('messages_ready_details/rate', 'messages_ready.rate'),
+    ('messages_ready', 'messages_ready', float),
+    ('messages_ready_details/rate', 'messages_ready.rate', float),
 
-    ('messages_unacknowledged', 'messages_unacknowledged'),
-    ('messages_unacknowledged_details/rate', 'messages_unacknowledged.rate'),
+    ('messages_unacknowledged', 'messages_unacknowledged', float),
+    ('messages_unacknowledged_details/rate', 'messages_unacknowledged.rate', float),
 
-    ('message_stats/ack', 'messages.ack.count'),
-    ('message_stats/ack_details/rate', 'messages.ack.rate'),
+    ('message_stats/ack', 'messages.ack.count', float),
+    ('message_stats/ack_details/rate', 'messages.ack.rate', float),
 
-    ('message_stats/deliver', 'messages.deliver.count'),
-    ('message_stats/deliver_details/rate', 'messages.deliver.rate'),
+    ('message_stats/deliver', 'messages.deliver.count', float),
+    ('message_stats/deliver_details/rate', 'messages.deliver.rate', float),
 
-    ('message_stats/deliver_get', 'messages.deliver_get.count'),
-    ('message_stats/deliver_get_details/rate', 'messages.deliver_get.rate'),
+    ('message_stats/deliver_get', 'messages.deliver_get.count', float),
+    ('message_stats/deliver_get_details/rate', 'messages.deliver_get.rate', float),
 
-    ('message_stats/publish', 'messages.publish.count'),
-    ('message_stats/publish_details/rate', 'messages.publish.rate'),
+    ('message_stats/publish', 'messages.publish.count', float),
+    ('message_stats/publish_details/rate', 'messages.publish.rate', float),
 
-    ('message_stats/redeliver', 'messages.redeliver.count'),
-    ('message_stats/redeliver_details/rate', 'messages.redeliver.rate'),
+    ('message_stats/redeliver', 'messages.redeliver.count', float),
+    ('message_stats/redeliver_details/rate', 'messages.redeliver.rate', float),
 ]
 
 NODE_ATTRIBUTES = [
-    ('fd_used', 'fd_used'),
-    ('mem_used', 'mem_used'),
-    ('run_queue', 'run_queue'),
-    ('sockets_used', 'sockets_used'),
+    ('fd_used', 'fd_used', float),
+    ('mem_used', 'mem_used', float),
+    ('run_queue', 'run_queue', float),
+    ('sockets_used', 'sockets_used', float),
+    ('partitions', 'partitions', len)
 ]
 
 ATTRIBUTES = {
@@ -65,13 +66,13 @@ ATTRIBUTES = {
 
 TAGS_MAP = {
     QUEUE_TYPE: {
-                'node':'node',
-                'name':'queue',
-                'vhost':'vhost',
-                'policy':'policy',
-            },
+        'node': 'node',
+                'name': 'queue',
+                'vhost': 'vhost',
+                'policy': 'policy',
+    },
     NODE_TYPE: {
-                'name':'node',
+        'name': 'node',
     }
 }
 
@@ -82,6 +83,7 @@ METRIC_SUFFIX = {
 
 
 class RabbitMQ(AgentCheck):
+
     """This check is for gathering statistics from the RabbitMQ
     Management Plugin (http://www.rabbitmq.com/management.html)
     """
@@ -123,39 +125,40 @@ class RabbitMQ(AgentCheck):
         for object_type, filters in specified.iteritems():
             for filter_type, filter_objects in filters.iteritems():
                 if type(filter_objects) != list:
-                    raise TypeError("{0} / {0}_regexes parameter must be a list".format(object_type))
+                    raise TypeError(
+                        "{0} / {0}_regexes parameter must be a list".format(object_type))
 
-        # setup urllib2 for Basic Auth
-        auth_handler = urllib2.HTTPBasicAuthHandler()
-        auth_handler.add_password(realm='RabbitMQ Management', uri=base_url, user=username, passwd=password)
-        opener = urllib2.build_opener(auth_handler)
-        urllib2.install_opener(opener)
+        auth = (username, password)
 
-        return base_url, max_detailed, specified
-
+        return base_url, max_detailed, specified, auth
 
     def check(self, instance):
-        base_url, max_detailed, specified = self._get_config(instance)
+        base_url, max_detailed, specified, auth = self._get_config(instance)
 
         # Generate metrics from the status API.
-        self.get_stats(instance, base_url, QUEUE_TYPE, max_detailed[QUEUE_TYPE], specified[QUEUE_TYPE])
-        self.get_stats(instance, base_url, NODE_TYPE, max_detailed[NODE_TYPE], specified[NODE_TYPE])
+        self.get_stats(instance, base_url, QUEUE_TYPE, max_detailed[
+                       QUEUE_TYPE], specified[QUEUE_TYPE], auth=auth)
+        self.get_stats(instance, base_url, NODE_TYPE, max_detailed[
+                       NODE_TYPE], specified[NODE_TYPE], auth=auth)
 
         # Generate a service check from the aliveness API.
         vhosts = instance.get('vhosts')
-        self._check_aliveness(base_url, vhosts)
+        self._check_aliveness(base_url, vhosts, auth=auth)
 
-    def _get_data(self, url):
+    def _get_data(self, url, auth=None):
         try:
-            data = json.loads(urllib2.urlopen(url).read())
-        except urllib2.URLError, e:
-            raise Exception('Cannot open RabbitMQ API url: %s %s' % (url, str(e)))
+            r = requests.get(url, auth=auth)
+            r.raise_for_status()
+            data = r.json()
+        except requests.exceptions.HTTPError as e:
+            raise Exception(
+                'Cannot open RabbitMQ API url: %s %s' % (url, str(e)))
         except ValueError, e:
-            raise Exception('Cannot parse JSON response from API url: %s %s' % (url, str(e)))
+            raise Exception(
+                'Cannot parse JSON response from API url: %s %s' % (url, str(e)))
         return data
 
-
-    def get_stats(self, instance, base_url, object_type, max_detailed, filters):
+    def get_stats(self, instance, base_url, object_type, max_detailed, filters, auth=None):
         """
         instance: the check instance
         base_url: the url of the rabbitmq management api (e.g. http://localhost:15672/api)
@@ -164,8 +167,11 @@ class RabbitMQ(AgentCheck):
         filters: explicit or regexes filters of specified queues or nodes (specified in the yaml file)
         """
 
-        data = self._get_data(urlparse.urljoin(base_url, object_type))
-        explicit_filters = list(filters['explicit']) # Make a copy of this list as we will remove items from it at each iteration
+        data = self._get_data(
+            urlparse.urljoin(base_url, object_type), auth=auth)
+        # Make a copy of this list as we will remove items from it at each
+        # iteration
+        explicit_filters = list(filters['explicit'])
         regex_filters = filters['regexes']
 
         """ data is a list of nodes or queues:
@@ -177,9 +183,11 @@ class RabbitMQ(AgentCheck):
         ]
         """
         if len(explicit_filters) > max_detailed:
-            raise Exception("The maximum number of %s you can specify is %d." % (object_type, max_detailed))
+            raise Exception(
+                "The maximum number of %s you can specify is %d." % (object_type, max_detailed))
 
-        if explicit_filters or regex_filters: # a list of queues/nodes is specified. We process only those
+        # a list of queues/nodes is specified. We process only those
+        if explicit_filters or regex_filters:
             matching_lines = []
             for data_line in data:
                 name = data_line.get("name")
@@ -195,14 +203,16 @@ class RabbitMQ(AgentCheck):
                         match_found = True
                         break
 
-                if match_found: continue
+                if match_found:
+                    continue
 
                 # Absolute names work only for queues
-                if object_type != QUEUE_TYPE: continue
+                if object_type != QUEUE_TYPE:
+                    continue
                 absolute_name = '%s/%s' % (data_line.get("vhost"), name)
                 if absolute_name in explicit_filters:
                     matching_lines.append(data_line)
-                    explicit_filters.remove(name)
+                    explicit_filters.remove(absolute_name)
                     continue
 
                 for p in regex_filters:
@@ -211,7 +221,8 @@ class RabbitMQ(AgentCheck):
                         match_found = True
                         break
 
-                if match_found: continue
+                if match_found:
+                    continue
 
             data = matching_lines
 
@@ -222,22 +233,23 @@ class RabbitMQ(AgentCheck):
 
         if len(data) > max_detailed:
             # Display a warning in the info page
-            self.warning("Too many queues to fetch. You must choose the %s you are interested in by editing the rabbitmq.yaml configuration file or get in touch with Datadog Support" % object_type)
+            self.warning(
+                "Too many queues to fetch. You must choose the %s you are interested in by editing the rabbitmq.yaml configuration file or get in touch with Datadog Support" % object_type)
 
         for data_line in data[:max_detailed]:
             # We truncate the list of nodes/queues if it's above the limit
             self._get_metrics(data_line, object_type)
 
-
     def _get_metrics(self, data, object_type):
         tags = []
         tag_list = TAGS_MAP[object_type]
-        for t in tag_list.keys():
-            tag = data.get(t, None)
-            if tag is not None:
+        for t in tag_list:
+            tag = data.get(t)
+            if tag:
+                # FIXME 6.x: remove this suffix or unify (sc doesn't have it)
                 tags.append('rabbitmq_%s:%s' % (tag_list[t], tag))
 
-        for attribute, metric_name in ATTRIBUTES[object_type]:
+        for attribute, metric_name, operation in ATTRIBUTES[object_type]:
             # Walk down through the data path, e.g. foo/bar => d['foo']['bar']
             root = data
             keys = attribute.split('/')
@@ -247,9 +259,11 @@ class RabbitMQ(AgentCheck):
             value = root.get(keys[-1], None)
             if value is not None:
                 try:
-                    self.gauge('rabbitmq.%s.%s' % (METRIC_SUFFIX[object_type], metric_name), float(value), tags=tags)
+                    self.gauge('rabbitmq.%s.%s' % (
+                        METRIC_SUFFIX[object_type], metric_name), operation(value), tags=tags)
                 except ValueError:
-                    self.log.debug("Caught ValueError for %s %s = %s  with tags: %s" % (METRIC_SUFFIX[object_type], attribute, value, tags))
+                    self.log.debug("Caught ValueError for %s %s = %s  with tags: %s" % (
+                        METRIC_SUFFIX[object_type], attribute, value, tags))
 
     def alert(self, base_url, max_detailed, size, object_type):
         key = "%s%s" % (base_url, object_type)
@@ -259,25 +273,26 @@ class RabbitMQ(AgentCheck):
 
         self.already_alerted.append(key)
 
-        title = "RabbitMQ integration is approaching the limit on the number of %s that can be collected from on %s" % (object_type, self.hostname)
+        title = "RabbitMQ integration is approaching the limit on the number of %s that can be collected from on %s" % (
+            object_type, self.hostname)
         msg = """%s %s are present. The limit is %s.
         Please get in touch with Datadog support to increase the limit.""" % (size, object_type, max_detailed)
 
         event = {
-                "timestamp": int(time.time()),
-                "event_type": EVENT_TYPE,
-                "msg_title": title,
-                "msg_text": msg,
-                "alert_type": 'warning',
-                "source_type_name": SOURCE_TYPE_NAME,
-                "host": self.hostname,
-                "tags": ["base_url:%s" % base_url, "host:%s" % self.hostname],
-                "event_object": "rabbitmq.limit.%s" % object_type,
-            }
+            "timestamp": int(time.time()),
+            "event_type": EVENT_TYPE,
+            "msg_title": title,
+            "msg_text": msg,
+            "alert_type": 'warning',
+            "source_type_name": SOURCE_TYPE_NAME,
+            "host": self.hostname,
+            "tags": ["base_url:%s" % base_url, "host:%s" % self.hostname],
+            "event_object": "rabbitmq.limit.%s" % object_type,
+        }
 
         self.event(event)
 
-    def _check_aliveness(self, base_url, vhosts=None):
+    def _check_aliveness(self, base_url, vhosts=None, auth=None):
         """ Check the aliveness API against all or a subset of vhosts. The API
             will return {"status": "ok"} and a 200 response code in the case
             that the check passes.
@@ -287,7 +302,7 @@ class RabbitMQ(AgentCheck):
         if not vhosts:
             # Fetch a list of _all_ vhosts from the API.
             vhosts_url = urlparse.urljoin(base_url, 'vhosts')
-            vhosts_response = self._get_data(vhosts_url)
+            vhosts_response = self._get_data(vhosts_url, auth=auth)
             vhosts = [v['name'] for v in vhosts_response]
 
         for vhost in vhosts:
@@ -297,7 +312,7 @@ class RabbitMQ(AgentCheck):
             aliveness_url = urlparse.urljoin(base_url, path)
             message = None
             try:
-                aliveness_response = self._get_data(aliveness_url)
+                aliveness_response = self._get_data(aliveness_url, auth=auth)
                 message = u"Response from aliveness API: %s" % aliveness_response
                 if aliveness_response.get('status') == 'ok':
                     status = AgentCheck.OK
@@ -306,7 +321,8 @@ class RabbitMQ(AgentCheck):
             except Exception as e:
                 # Either we got a bad status code or unparseable JSON.
                 status = AgentCheck.CRITICAL
-                self.warning('Error when checking aliveness for vhost %s: %s'\
-                    % (vhost, str(e)))
+                self.warning('Error when checking aliveness for vhost %s: %s'
+                             % (vhost, str(e)))
 
-            self.service_check('rabbitmq.aliveness', status, tags, message=message)
+            self.service_check(
+                'rabbitmq.aliveness', status, tags, message=message)

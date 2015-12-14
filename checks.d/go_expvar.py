@@ -1,12 +1,12 @@
 # stdlib
-import re
 from collections import defaultdict
-
-# project
-from checks import AgentCheck
+import re
 
 # 3rd party
 import requests
+
+# project
+from checks import AgentCheck
 
 DEFAULT_MAX_METRICS = 350
 PATH = "path"
@@ -24,7 +24,7 @@ SUPPORTED_TYPES = {
     RATE: AgentCheck.rate,
 }
 
-METRIC_NAMESPACE = "go_expvar"
+DEFAULT_METRIC_NAMESPACE = "go_expvar"
 
 
 # See http://golang.org/pkg/runtime/#MemStats
@@ -71,9 +71,10 @@ class GoExpvar(AgentCheck):
         data = self._get_data(url)
         metrics = DEFAULT_METRICS + instance.get("metrics", [])
         max_metrics = instance.get("max_returned_metrics", DEFAULT_MAX_METRICS)
-        return data, tags, metrics, max_metrics, url
+        namespace = instance.get('namespace', DEFAULT_METRIC_NAMESPACE)
+        return data, tags, metrics, max_metrics, url, namespace
 
-    def get_gc_collection_histogram(self, data, tags, url):
+    def get_gc_collection_histogram(self, data, tags, url, namespace):
         num_gc = data.get("memstats", {}).get("NumGC")
         pause_hist = data.get("memstats", {}).get("PauseNs")
         last_gc_count = self._last_gc_count[url]
@@ -91,16 +92,15 @@ class GoExpvar(AgentCheck):
 
         for value in values:
             self.histogram(
-                self.normalize("memstats.PauseNs", METRIC_NAMESPACE, fix_case=True),
+                self.normalize("memstats.PauseNs", namespace, fix_case=True),
                 value, tags=tags)
 
-
     def check(self, instance):
-        data, tags, metrics, max_metrics, url = self._load(instance)
-        self.get_gc_collection_histogram(data, tags, url)
-        self.parse_expvar_data(data, tags, metrics, max_metrics)
+        data, tags, metrics, max_metrics, url, namespace = self._load(instance)
+        self.get_gc_collection_histogram(data, tags, url, namespace)
+        self.parse_expvar_data(data, tags, metrics, max_metrics, namespace)
 
-    def parse_expvar_data(self, data, tags, metrics, max_metrics):
+    def parse_expvar_data(self, data, tags, metrics, max_metrics, namespace):
         '''
         Report all the metrics based on the configuration in instance
         If a metric is not well configured or is not present in the payload,
@@ -136,16 +136,17 @@ class GoExpvar(AgentCheck):
                 if tag_by_path:
                     metric_tags.append("path:%s" % actual_path)
 
-                metric_name = alias or self.normalize(actual_path, METRIC_NAMESPACE, fix_case=True)
+                metric_name = alias or self.normalize(actual_path, namespace, fix_case=True)
 
                 try:
                     float(value)
                 except ValueError:
-                    self.log.warning("Unreportable value for path %s: %s" % (path,value))
+                    self.log.warning("Unreportable value for path %s: %s" % (path, value))
                     continue
 
                 if count >= max_metrics:
-                    self.warning("Reporting more metrics than the allowed maximum. Please contact support@datadoghq.com for more information.")
+                    self.warning("Reporting more metrics than the allowed maximum. "
+                                 "Please contact support@datadoghq.com for more information.")
                     return
 
                 SUPPORTED_TYPES[metric_type](self, metric_name, value, metric_tags)
@@ -181,7 +182,7 @@ class GoExpvar(AgentCheck):
             return [(traversed_path, content)]
 
         key = keys[0]
-        regex = "".join(["^",key,"$"])
+        regex = "".join(["^", key, "$"])
         try:
             key_rex = re.compile(regex)
         except Exception:

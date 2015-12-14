@@ -1,10 +1,11 @@
 """ Collect status information for Windows services
 """
+# 3rd party
+import wmi
+
 # project
 from checks import AgentCheck
 
-# 3rd party
-import wmi
 
 class WindowsService(AgentCheck):
     STATE_TO_VALUE = {
@@ -18,8 +19,8 @@ class WindowsService(AgentCheck):
         'Unknown': AgentCheck.UNKNOWN
     }
 
-    def __init__(self, name, init_config, agentConfig):
-        AgentCheck.__init__(self, name, init_config, agentConfig)
+    def __init__(self, name, init_config, agentConfig, instances):
+        AgentCheck.__init__(self, name, init_config, agentConfig, instances)
         self.wmi_conns = {}
 
     def _get_wmi_conn(self, host, user, password):
@@ -33,7 +34,6 @@ class WindowsService(AgentCheck):
         host = instance.get('host', None)
         user = instance.get('username', None)
         password = instance.get('password', None)
-        tags = instance.get('tags') or []
         services = instance.get('services') or []
         w = self._get_wmi_conn(host, user, password)
 
@@ -41,6 +41,7 @@ class WindowsService(AgentCheck):
             raise Exception('No services defined in windows_service.yaml')
 
         for service in services:
+            self.log.debug(u"Looking for service name: %s" % service)
             results = w.Win32_Service(name=service)
             if len(results) == 0:
                 self.warning(u"No services found matching %s" % service)
